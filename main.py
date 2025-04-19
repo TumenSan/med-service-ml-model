@@ -34,10 +34,9 @@ if __name__ == '__main__':
         connection = pika.BlockingConnection(parameters)
         channel = connection.channel()
 
-        # channel.queue_declare(queue='medical_tasks')
+        channel.queue_declare(queue='medical_tasks')
         channel.queue_declare(queue='medical_results')
-        channel.queue_declare(queue='medical_queue') # tasks?
-        channel.basic_consume(queue='medical_queue',
+        channel.basic_consume(queue='medical_tasks',
                               on_message_callback=callback,
                               auto_ack=True)
 
