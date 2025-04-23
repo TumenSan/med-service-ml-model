@@ -1,6 +1,7 @@
 import pika
 import json
 import logging
+import requests
 from datetime import datetime
 
 # Настройка логирования
@@ -10,92 +11,131 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# Класс маршрутизации задач на соответствующие ML-сервисы
+class MLRouter:
+    model_endpoints = {
+        "dicom_analysis": "http://dicom-service:8000/api/process",
+        "lab_analysis":   "http://lab-service:8001/api/process",
+        "ecg_analysis":   "http://ecg-service:8002/api/process"
+    }
+
+    @staticmethod
+    def route_task(task: dict) -> dict:
+        task_type = task.get("type")
+        url = MLRouter.model_endpoints.get(task_type)
+        if not url:
+            error_msg = f"unsupported_task_type: {task_type}"
+            logger.error(error_msg)
+            return {"error": error_msg, "task_id": task.get("task_id"), "status": "failed"}
+
+        try:
+            response = requests.post(url, json=task, timeout=30)
+            response.raise_for_status()
+            return response.json()
+        except Exception as e:
+            logger.error(f"Ошибка обращения к модели {task_type}: {e}")
+            return {"error": str(e), "task_id": task.get("task_id"), "status": "failed"}
+
 
 class MedicalWorker:
+    RABBIT_HOST = 'localhost'
+    TASKS_QUEUE = 'medical_tasks'
+    RESULTS_QUEUE = 'medical_results'
+
     def __init__(self):
         self.connection = None
         self.channel = None
 
-    def connect(self):
-        """Подключение к RabbitMQ с фиксированными параметрами"""
+    def connect(self) -> bool:
         credentials = pika.PlainCredentials('admin', 'password')
-        parameters = pika.ConnectionParameters(
-            host='localhost',
+        params = pika.ConnectionParameters(
+            host=self.RABBIT_HOST,
             port=5672,
-            credentials=credentials
+            credentials=credentials,
+            heartbeat=600,
+            connection_attempts=3,
+            retry_delay=5
         )
 
         try:
-            self.connection = pika.BlockingConnection(parameters)
+            self.connection = pika.BlockingConnection(params)
             self.channel = self.connection.channel()
-
-            # Очистка и пересоздание очередей
-            self.channel.queue_delete(queue='medical_tasks')
-            self.channel.queue_delete(queue='medical_results')
-
-            # Создание durable очередей
-            self.channel.queue_declare(queue='medical_tasks', durable=True)
-            self.channel.queue_declare(queue='medical_results', durable=True)
+            # Объявляем durable очереди
+            self.channel.queue_declare(queue=self.TASKS_QUEUE, durable=True)
+            self.channel.queue_declare(queue=self.RESULTS_QUEUE, durable=True)
+            # QoS (по одной задаче на воркер)
+            self.channel.basic_qos(prefetch_count=1)
 
             logger.info("Успешное подключение к RabbitMQ")
             return True
-
         except Exception as e:
-            logger.error(f"Ошибка подключения: {str(e)}")
+            logger.error(f"Ошибка подключения: {e}")
             return False
 
-    def process_task(self, task):
-        """Обработка задачи (заглушка)"""
-        # Ваша реальная логика обработки
-        return {
-            "task_id": task.get("task_id"),
-            "status": "completed",
-            "result": "Sample result"
-        }
+    def send_to_queue(self, result: dict):
+        """Отправка результата в очередь medical_results"""
+        try:
+            self.channel.basic_publish(
+                exchange='',
+                routing_key=self.RESULTS_QUEUE,
+                body=json.dumps(result),
+                properties=pika.BasicProperties(delivery_mode=2)
+            )
+            logger.info(f"Результат записан в очередь {self.RESULTS_QUEUE}")
+        except Exception as e:
+            logger.error(f"Не удалось отправить в очередь: {e}")
+
+    def send_to_spring(self, result: dict) -> bool:
+        """Пытаемся отправить результат напрямую в Spring Boot"""
+        try:
+            resp = requests.post("http://localhost:8080/api/results", json=result, timeout=10)
+            resp.raise_for_status()
+            logger.info("Результат успешно отправлен в Spring Boot")
+            return True
+        except Exception as e:
+            logger.warning(f"Не удалось отправить в Spring: {e}")
+            return False
+
+    def process_task(self, task: dict) -> dict:
+        return MLRouter.route_task(task)
 
     def callback(self, ch, method, properties, body):
-        """Обработчик сообщений"""
         try:
             task = json.loads(body)
             logger.info(f"Получена задача: {task}")
 
             result = self.process_task(task)
+            result['timestamp'] = datetime.utcnow().isoformat()
 
-            self.channel.basic_publish(
-                exchange='',
-                routing_key='medical_results',
-                body=json.dumps(result),
-                properties=pika.BasicProperties(
-                    delivery_mode=2  # persistent message
-                )
-            )
-            logger.info(f"Отправлен результат: {result}")
+            # Сначала пытаемся в Spring, иначе в очередь
+            if not self.send_to_spring(result):
+                self.send_to_queue(result)
 
         except Exception as e:
-            logger.error(f"Ошибка обработки: {str(e)}")
+            logger.error(f"Критическая ошибка обработки: {e}")
+        finally:
+            # Подтверждаем приём
+            ch.basic_ack(delivery_tag=method.delivery_tag)
 
     def start(self):
-        """Запуск сервиса"""
         if not self.connect():
             return
 
+        logger.info("Ожидание задач в очереди medical_tasks...")
+        self.channel.basic_consume(
+            queue=self.TASKS_QUEUE,
+            on_message_callback=self.callback,
+            auto_ack=False
+        )
+
         try:
-            self.channel.basic_consume(
-                queue='medical_tasks',
-                on_message_callback=self.callback,
-                auto_ack=True
-            )
-
-            logger.info("Ожидание задач...")
             self.channel.start_consuming()
-
         except KeyboardInterrupt:
-            logger.info("Остановка по запросу пользователя")
-        except Exception as e:
-            logger.error(f"Ошибка в работе сервиса: {str(e)}")
+            logger.info("Работа остановлена пользователем")
         finally:
             if self.connection and self.connection.is_open:
                 self.connection.close()
+                logger.info("Соединение RabbitMQ закрыто")
 
 
 if __name__ == '__main__':
