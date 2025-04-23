@@ -1,103 +1,103 @@
 import pika
 import json
+import logging
+from datetime import datetime
+
+# Настройка логирования
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
 
 
-def process_dicom_analysis(task_data):
-    # Обработка DICOM файлов
-    print(f"Анализ DICOM файла {task_data['file_id']}")
-    # Здесь ML-логика для DICOM
-    return {
-        "type": "dicom_analysis",
-        "file_id": task_data["file_id"],
-        "result": "normal",
-        "confidence": 0.92
-    }
+class MedicalWorker:
+    def __init__(self):
+        self.connection = None
+        self.channel = None
 
+    def connect(self):
+        """Подключение к RabbitMQ с фиксированными параметрами"""
+        credentials = pika.PlainCredentials('admin', 'password')
+        parameters = pika.ConnectionParameters(
+            host='localhost',
+            port=5672,
+            credentials=credentials
+        )
 
-def process_lab_results(task_data):
-    # Обработка лабораторных результатов
-    print(f"Анализ лабораторных данных пациента {task_data['patient_id']}")
-    # Здесь аналитическая логика
-    return {
-        "type": "lab_analysis",
-        "patient_id": task_data["patient_id"],
-        "indicators": task_data["indicators"],
-        "diagnosis": "diabetes",
-        "severity": "moderate"
-    }
+        try:
+            self.connection = pika.BlockingConnection(parameters)
+            self.channel = self.connection.channel()
 
+            # Очистка и пересоздание очередей
+            self.channel.queue_delete(queue='medical_tasks')
+            self.channel.queue_delete(queue='medical_results')
 
-def process_task(task):
-    # Логика обработки
-    if not isinstance(task, dict):
-        return {"error": "invalid_task_format"}
+            # Создание durable очередей
+            self.channel.queue_declare(queue='medical_tasks', durable=True)
+            self.channel.queue_declare(queue='medical_results', durable=True)
 
-    task_type = task.get("type")
+            logger.info("Успешное подключение к RabbitMQ")
+            return True
 
-    if not task_type:
-        print("Получена задача без типа")
-        return {"error": "missing_task_type"}
+        except Exception as e:
+            logger.error(f"Ошибка подключения: {str(e)}")
+            return False
 
-    print(f"Определен тип задачи: {task_type}")
+    def process_task(self, task):
+        """Обработка задачи (заглушка)"""
+        # Ваша реальная логика обработки
+        return {
+            "task_id": task.get("task_id"),
+            "status": "completed",
+            "result": "Sample result"
+        }
 
-    handlers = {
-        "dicom_analysis": process_dicom_analysis,
-        "lab_analysis": process_lab_results,
-    }
+    def callback(self, ch, method, properties, body):
+        """Обработчик сообщений"""
+        try:
+            task = json.loads(body)
+            logger.info(f"Получена задача: {task}")
 
-    handler = handlers.get(task_type)
-    if not handler:
-        return {"error": f"unsupported_task_type: {task_type}"}
+            result = self.process_task(task)
 
-    try:
-        return handler(task)
-    except Exception as e:
-        return {"error": str(e)}
-    # return {"status": "processed", "task": task}
+            self.channel.basic_publish(
+                exchange='',
+                routing_key='medical_results',
+                body=json.dumps(result),
+                properties=pika.BasicProperties(
+                    delivery_mode=2  # persistent message
+                )
+            )
+            logger.info(f"Отправлен результат: {result}")
 
+        except Exception as e:
+            logger.error(f"Ошибка обработки: {str(e)}")
 
-def callback(ch, method, properties, body):
-    task = json.loads(body)
-    print(f"Обработка задачи: {task}")
-    result = process_task(task)
-    channel.basic_publish(
-        exchange='',
-        routing_key='medical_results',
-        body=json.dumps(result)
-    )
+    def start(self):
+        """Запуск сервиса"""
+        if not self.connect():
+            return
+
+        try:
+            self.channel.basic_consume(
+                queue='medical_tasks',
+                on_message_callback=self.callback,
+                auto_ack=True
+            )
+
+            logger.info("Ожидание задач...")
+            self.channel.start_consuming()
+
+        except KeyboardInterrupt:
+            logger.info("Остановка по запросу пользователя")
+        except Exception as e:
+            logger.error(f"Ошибка в работе сервиса: {str(e)}")
+        finally:
+            if self.connection and self.connection.is_open:
+                self.connection.close()
 
 
 if __name__ == '__main__':
-    credentials = pika.PlainCredentials('admin', 'password')
-    parameters = pika.ConnectionParameters(
-        host='localhost',
-        port=5672,
-        credentials=credentials
-    )
-
-    try:
-        connection = pika.BlockingConnection(parameters)
-        channel = connection.channel()
-
-        # Очистка и пересоздание очередей (для разработки)
-        channel.queue_delete(queue='medical_tasks')
-        channel.queue_delete(queue='medical_results')
-
-        # Создание durable очередей
-        channel.queue_declare(queue='medical_tasks', durable=True)
-        channel.queue_declare(queue='medical_results', durable=True)
-
-        channel.basic_consume(
-            queue='medical_tasks',
-            on_message_callback=callback,
-            auto_ack=True
-        )
-
-        print('Ожидание задач...')
-        channel.start_consuming()
-
-    except Exception as e:
-        print(f"Ошибка: {e}")
-    finally:
-        if 'connection' in locals() and connection.is_open:
-            connection.close()
+    worker = MedicalWorker()
+    worker.start()
