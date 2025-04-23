@@ -14,14 +14,13 @@ logger = logging.getLogger(__name__)
 # Класс маршрутизации задач на соответствующие ML-сервисы
 class MLRouter:
     model_endpoints = {
-        "dicom_analysis": "http://dicom-service:8000/api/process",
-        "lab_analysis":   "http://lab-service:8001/api/process",
-        "ecg_analysis":   "http://ecg-service:8002/api/process"
+        "dicom_analysis": "http://localhost:8000/api/process",
+        "lab_analysis":   "http://lab-service:8001/api/process"
     }
 
     @staticmethod
     def route_task(task: dict) -> dict:
-        task_type = task.get("type")
+        task_type = task.get("type") or task.get("taskType") # поддержка обоих записей
         url = MLRouter.model_endpoints.get(task_type)
         if not url:
             error_msg = f"unsupported_task_type: {task_type}"
@@ -105,14 +104,43 @@ class MedicalWorker:
             logger.info(f"Получена задача: {task}")
 
             result = self.process_task(task)
-            result['timestamp'] = datetime.utcnow().isoformat()
+            logger.info(f"Результат от модели: {result}")
+            #result['timestamp'] = datetime.utcnow().isoformat()
 
-            # Сначала пытаемся в Spring, иначе в очередь
-            if not self.send_to_spring(result):
-                self.send_to_queue(result)
+            adapted_result = {
+                "taskId": result.get("task_id", task.get("taskId")),
+                "modelId": result.get("model_id", task.get("modelId")),
+                "data": result.get("data", "unknown"),
+                "conclusion": result.get("conclusion", "no_conclusion"),
+                "status": "COMPLETED"  # можно адаптировать под бизнес-логику
+            }
+
+            # Отправляем результат в Spring Boot
+            try:
+                response = requests.post(
+                    "http://localhost:8080/api/results",
+                    json=adapted_result,
+                    timeout=10
+                )
+                response.raise_for_status()
+                logger.info("Результат успешно отправлен в Spring")
+
+            except requests.exceptions.RequestException as e:
+                logger.warning(f"Не удалось отправить в Spring: {e}")
+
+            # Продублируем в очередь
+            self.channel.basic_publish(
+                exchange='',
+                routing_key='medical_results',
+                body=json.dumps(adapted_result),
+                properties=pika.BasicProperties(
+                    delivery_mode=2  # persistent
+                )
+            )
+            logger.info("Результат записан в очередь medical_results")
 
         except Exception as e:
-            logger.error(f"Критическая ошибка обработки: {e}")
+            logger.error(f"Ошибка обработки: {str(e)}")
         finally:
             # Подтверждаем приём
             ch.basic_ack(delivery_tag=method.delivery_tag)
