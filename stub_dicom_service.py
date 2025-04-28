@@ -4,82 +4,71 @@ import pydicom
 from PIL import Image
 import tensorflow as tf
 import io
+import logging
 import os
 from datetime import datetime
-import time
-#from model_inference import load_model, run_inference
+
+# Настройка логирования
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 
 
-# Загружаем модель (один раз)
-model = tf.keras.models.load_model("horse_zebra_classifier.h5")
-#model = load_model("pretrained_model.h5")
-
-CLASS_NAMES = ['horse', 'zebra']
-
 def preprocess_image(image_bytes, target_size=(128, 128)):
     """Предобработка изображения для классификатора"""
-    img = Image.open(io.BytesIO(image_bytes)).convert('RGB')
-    img = img.resize(target_size)
-    img_array = np.array(img) / 255.0
-    return np.expand_dims(img_array, axis=0)
+    try:
+        img = Image.open(io.BytesIO(image_bytes)).convert('RGB')
+        img = img.resize(target_size)
+        img_array = np.array(img) / 255.0
+        return np.expand_dims(img_array, axis=0)
+    except Exception as e:
+        logger.error(f"Ошибка предобработки изображения: {e}")
+        raise
 
 # Обработка DICOM и получение предсказания
-def run_inference(model, dicom_path_or_data):
-    # Предположим, приходит путь к DICOM файлу
-    ds = pydicom.dcmread(dicom_path_or_data)
-    img = ds.pixel_array
-    # заглушка
-    img = Image.open("00000003_001.png")
-    # Меняем размер на 320x320
-    resized_image = img.resize((320, 320))
-
-    # Сохраняем результат
-    resized_image.save("output_image_320x320.jpg")
-
-    # Пример предобработки (масштабирование, изменение размера и т.д.)
-    #img_resized = cv2.resize(img, (224, 224))  # адаптируй под свою модель
-    #img_normalized = img_resized / 255.0
-    #img_input = np.expand_dims(img_normalized, axis=0)
-
-    # Предсказание
-    #prediction = model.predict(img_input)
-    prediction = model.predict(resized_image)
-    #class_idx = int(np.argmax(prediction))
-    #confidence = float(np.max(prediction))
-
-    print(prediction)
-
-    return {
-        prediction
-        #"class": class_idx,
-        #"confidence": confidence
-    }
-
-
-@app.route('/api/process', methods=['POST'])
-def process_dicom():
-    data = request.json
-    dicom_input = data.get("parameters")
-    print("Stub получил данные:", data)
-    # time.sleep(1)  # Имитация задержки
-    # Преобразование и предсказание
+def run_inference(model, image_or_dicom_path_or_data):
     # Путь к локальному файлу
-    img_path = 'zebra_picture.png'
+    img_path = 'horse_picture.png'
+    #img_path = 'zebra_picture.png'
 
     # Чтение и предобработка файла
     with open(img_path, 'rb') as f:
         img_bytes = f.read()
 
+    # Преобразование
     img_data = preprocess_image(img_bytes)
+
+    CLASS_NAMES = ['horse', 'zebra']
 
     # Предсказание
     prediction = model.predict(img_data)
     class_idx = int(prediction[0][0] > 0.5)
     confidence = float(prediction[0][0] if class_idx == 1 else 1 - prediction[0][0])
     class_name = CLASS_NAMES[class_idx]
-    print(class_name, confidence)
+    logger.info(f"Предсказание: {class_name} (уверенность: {confidence:.2%})")
+
+    return {
+        "class_name": class_name,
+        "confidence": confidence
+    }
+
+
+@app.route('/api/process', methods=['POST'])
+def process_dicom():
+    data = request.json
+    logger.info(f"Получены данные:", data)
+    dicom_input = data.get("parameters")
+    print("Получены данные:", data)
+
+    # Загружаем модель (один раз)
+    model_path = "horse_zebra_classifier.h5"
+    try:
+        model = tf.keras.models.load_model(model_path)
+        print("Модель успешно загружена.")
+    except Exception as e:
+        print(f"Ошибка при загрузке модели: {e}")
+        return jsonify({"error": "Не удалось загрузить модель."}), 500
 
     try:
         result = run_inference(model, dicom_input)  # результат анализа
@@ -88,8 +77,8 @@ def process_dicom():
             "model_id": data.get("modelId"),
             "data": data.get("parameters"),
             #"data": "{\"bloodPressure\": \"120/80\",\"glucose\": 5.4}",
-            "conclusion": class_name
-            #"timestamp": datetime.now().isoformat(),
+            "conclusion": result["class_name"]
+            #"confidence": result["confidence"],
         }
     except Exception as e:
         response = {
@@ -98,8 +87,8 @@ def process_dicom():
             "data": data.get("parameters"),
             "error": str(e)
         }
-
-    return jsonify(response)
+    finally:
+        return jsonify(response)
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=8000)
