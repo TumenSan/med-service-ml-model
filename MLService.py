@@ -23,8 +23,6 @@ REQUEST_COUNTER = Counter('inference_requests_total', 'Total inference requests 
 
 # Поддерживаемые модели
 MODEL_PATHS = {
-    #"horse_v1": {"path": "models/horse_zebra_classifier.h5", "type": "keras"},
-    #"horse_onnx": {"path": "models/horse_zebra.onnx", "type": "onnx"}
     "1": {"path": "models/horse_zebra_classifier.h5", "type": "keras"},
     "2": {"path": "models/horse_zebra.onnx", "type": "onnx"}
 }
@@ -81,7 +79,7 @@ manager.load_all_models()
 def preprocess_image(config=MODEL_CONFIG) -> tf.Tensor:
     try:
         # Путь к вашему изображению
-        image_path = "horse_picture.png"
+        image_path = "zebra_picture.png"
 
         if not os.path.exists(image_path):
             raise FileNotFoundError(
@@ -103,10 +101,6 @@ def preprocess_image(config=MODEL_CONFIG) -> tf.Tensor:
         else:
             # Обычное изображение
             img = Image.open(io.BytesIO(image_bytes)).convert(config["color_mode"])
-
-        # Преобразование в Base64
-        #encoded_image = base64.b64encode(image_data).decode('utf-8')
-        #image_bytes = encoded_image
 
         # Изменение размера и нормализация
         img = img.resize(config["input_size"])
@@ -146,7 +140,6 @@ def process_request():
         logger.info("Получен запрос:", data)
         print("Получен запрос:", data)
 
-        print(111)
         model_name = data.get("modelId") or "default"
         if model_name not in manager.models:
             return jsonify({
@@ -154,15 +147,8 @@ def process_request():
                 "supported": list(manager.models.keys())
             }), 400
 
-        print(222)
+
         REQUEST_COUNTER.labels(model=model_name).inc()
-
-        #image_b64 = data.get("parameters")
-        #if not image_b64:
-        #    return jsonify({"error": "Missing 'parameters' field"}), 400
-
-        # Декодируем Base64
-        #image_bytes = base64.b64decode(image_b64)
 
         # Предобработка
         input_tensor = preprocess_image()
@@ -172,7 +158,8 @@ def process_request():
             prediction = manager.models[model_name]['predict_fn'](manager.models[model_name]['model'], input_tensor)
 
         confidence = float(prediction[0][0])
-        class_name = CLASS_NAMES[int(confidence > 0.5)]
+        print("confidence: ", confidence)
+        class_name = CLASS_NAMES[int(confidence < 0.5)]
 
         return jsonify({
             "task_id": data.get("taskId"),
