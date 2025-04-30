@@ -36,12 +36,13 @@ class MLRouter:
 
     @staticmethod
     def route_task(task: dict) -> dict:
-        cache_key = MLRouter.get_cache_key(task)
-        cached = redis_client.get(cache_key)
+        # Отключаем кэш для тестирования
+        # cache_key = MLRouter.get_cache_key(task)
+        # cached = redis_client.get(cache_key)
 
-        if cached:
-            logger.info(f"Cache hit for key {cache_key}")
-            return json.loads(cached)
+        # if cached:
+        #     logger.info(f"Cache hit for key {cache_key}")
+        #     return json.loads(cached)
 
         task_type = task.get("type") or task.get("taskType")
         url = MLRouter.MODEL_ENDPOINTS.get(task_type)
@@ -50,14 +51,14 @@ class MLRouter:
             error_msg = f"unsupported_task_type: {task_type}"
             logger.error(error_msg)
             result = {"error": error_msg, "task_id": task.get("taskId"), "status": "failed"}
-            redis_client.setex(cache_key, 300, json.dumps(result))
+            # redis_client.setex(cache_key, 300, json.dumps(result))
             return result
 
         try:
             response = requests.post(url, json=task, timeout=30)
             response.raise_for_status()
             result = response.json()
-            redis_client.setex(cache_key, 3600, json.dumps(result))
+            # redis_client.setex(cache_key, 3600, json.dumps(result))
             return result
         except Exception as e:
             logger.error(f"Ошибка обращения к модели {task_type}: {e}")
