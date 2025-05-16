@@ -1,15 +1,24 @@
-FROM nvidia/cuda-python:12.1.1-base
+FROM nvidia/cuda:12.4.0-base-ubuntu22.04
 
+# Установка Python и pip
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
-        build-essential python3-pip libgl1 libsm6 ffmpeg zlib1g-dev libjpeg-dev \
-    && rm -rf /var/lib/apt/lists/*
+        python3 python3-pip libgl1 libsm6 ffmpeg zlib1g-dev libjpeg-dev && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
 
+# Копируем requirements.txt
+COPY requirements.txt .
+
+# Обновляем pip и устанавливаем зависимости
+RUN python3 -m pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir -r requirements.txt
+
+# Копируем исходные файлы
 COPY . .
 
 EXPOSE 8000
+
 CMD ["python", "MLService.py"]
