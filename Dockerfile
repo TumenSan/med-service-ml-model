@@ -21,4 +21,4 @@ COPY . .
 
 EXPOSE 8000
 
-CMD ["python", "MLService.py"]
+CMD ["python3", "MLService.py"]
